@@ -87,11 +87,39 @@ async function hasHumanChallenge(page) {
       '[id*="hcaptcha" i]',
       '[class*="turnstile" i]',
       '[id*="turnstile" i]',
-      'text=/captcha|sicherheitsabfrage|ich bin kein roboter|robot/i'
+      'text=/captcha|sicherheitsabfrage|ich bin kein roboter|robot|zeichen|sicherheitscode|prüfcode|pruefcode|code eingeben/i'
     ].join(', ')
   );
 
   return (await challenge.count().catch(() => 0)) > 0;
+}
+
+async function hasManualActionPrompt(page) {
+  if (await hasHumanChallenge(page)) return true;
+
+  const bodyText = await page.locator('body').innerText({ timeout: 1500 }).catch(() => '');
+  if (
+    /captcha|sicherheitsabfrage|ich bin kein roboter|robot|zeichen|sicherheitscode|prüfcode|pruefcode|code eingeben|eingeben.*code|angezeigten/i.test(
+      bodyText
+    )
+  ) {
+    return true;
+  }
+
+  const visibleTextInputs = await page
+    .locator(
+      [
+        'input[type="text"]:visible',
+        'input:not([type]):visible',
+        'input[inputmode]:visible',
+        'textarea:visible'
+      ].join(', ')
+    )
+    .count()
+    .catch(() => 0);
+
+  const onLoginPage = await isProbablyLoggedOut(page).catch(() => false);
+  return visibleTextInputs > 0 && !onLoginPage;
 }
 
 async function launchBrowser({ forceVisible = false } = {}) {
@@ -427,7 +455,7 @@ async function waitForHumanChallenge(context) {
 
   const rl = readline.createInterface({ input, output });
   try {
-    await rl.question('Handle the winSIM login page in the browser, then press Enter here...');
+    await rl.question('Handle the winSIM CAPTCHA/login/booking check in the browser, then press Enter here...');
   } finally {
     if (reminder) clearInterval(reminder);
     rl.close();
@@ -522,8 +550,17 @@ async function clickOptionalConfirmation(page) {
 }
 
 async function checkAndMaybeBook(page) {
+  if (await hasManualActionPrompt(page)) {
+    console.log(`[${new Date().toISOString()}] Manual challenge is already open; pausing without refresh.`);
+    return 'MANUAL_ATTENTION';
+  }
+
   await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
   await page.waitForLoadState('load', { timeout: 3_000 }).catch(() => {});
+
+  if (await hasManualActionPrompt(page)) {
+    return 'MANUAL_ATTENTION';
+  }
 
   if (await isProbablyLoggedOut(page)) {
     return 'LOGIN_REQUIRED';
@@ -553,9 +590,23 @@ async function checkAndMaybeBook(page) {
     return;
   }
 
+  await page.waitForLoadState('load', { timeout: 3_000 }).catch(() => {});
+  await page.waitForTimeout(750);
+
+  if (await hasManualActionPrompt(page)) {
+    console.log(`[${new Date().toISOString()}] winSIM showed a CAPTCHA/manual check after booking click.`);
+    return 'MANUAL_ATTENTION';
+  }
+
   if (confirmBooking) {
     const confirmed = await clickOptionalConfirmation(page);
     console.log(confirmed ? 'Clicked confirmation button.' : 'No confirmation button appeared.');
+
+    await page.waitForLoadState('load', { timeout: 3_000 }).catch(() => {});
+    if (await hasManualActionPrompt(page)) {
+      console.log(`[${new Date().toISOString()}] winSIM showed a CAPTCHA/manual check after confirmation.`);
+      return 'MANUAL_ATTENTION';
+    }
   }
 
   const state = resetDailyCounterIfNeeded(await readState());
@@ -574,6 +625,11 @@ try {
     const result = await checkAndMaybeBook(page);
     if (result === 'LOGIN_REQUIRED') {
       const restored = await restoreLogin(context, page);
+      context = restored.context;
+      page = restored.page;
+    }
+    if (result === 'MANUAL_ATTENTION') {
+      const restored = await waitForHumanChallenge(context);
       context = restored.context;
       page = restored.page;
     }
