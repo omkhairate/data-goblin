@@ -23,6 +23,7 @@ const once = process.argv.includes('--once');
 const checkIntervalMs = Number(process.env.CHECK_INTERVAL_MS || 5_000);
 const loginMaxAttempts = Number(process.env.LOGIN_MAX_ATTEMPTS || 4);
 const manualAttentionReminderMs = Number(process.env.MANUAL_ATTENTION_REMINDER_MS || 120_000);
+const manualAttentionPopup = process.env.MANUAL_ATTENTION_POPUP !== 'false';
 const keychainService = process.env.WINSIM_KEYCHAIN_SERVICE || 'winsim-auto-booker';
 const execFileAsync = promisify(execFile);
 
@@ -138,12 +139,32 @@ async function launchBrowser({ forceVisible = false } = {}) {
   }
 }
 
+function appleScriptString(value) {
+  return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+}
+
 async function notifyHumanChallenge(repeated = false) {
-  console.log('winSIM requires manual login attention.');
+  const message = `${repeated ? 'Still waiting: c' : 'C'}heck the winSIM CAPTCHA/login page, then return to Terminal and press Enter.`;
+  console.log(`winSIM requires manual login attention. ${message}`);
+
+  output.write('\u0007');
+  execFile('afplay', ['/System/Library/Sounds/Ping.aiff'], () => {});
+
   await execFileAsync('osascript', [
     '-e',
-    `display notification "${repeated ? 'Still waiting: c' : 'C'}heck the winSIM CAPTCHA/login page, then return to Terminal and press Enter." with title "winSIM auto booker" sound name "Ping"`
+    `display notification ${appleScriptString(message)} with title "data-goblin" sound name "Ping"`
   ]).catch(() => {});
+
+  if (manualAttentionPopup && !repeated) {
+    execFile(
+      'osascript',
+      [
+        '-e',
+        `display dialog ${appleScriptString(message)} with title "data-goblin needs you" buttons {"OK"} default button "OK" giving up after 30`
+      ],
+      () => {}
+    );
+  }
 }
 
 async function saveDiagnostics(page, reason) {
